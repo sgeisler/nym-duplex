@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Sender;
 
 /// Identifier of a connection, should be large enough chosen randomly since it's used as a crude
 /// authentication mechanism. An attacker that can guess a connection id can potentially inject data
@@ -30,15 +29,6 @@ pub enum Payload {
     /// server if it received more SURBs than needed right now. This behavior is intended to make it
     /// unobservable if the client is receiving traffic.
     SURB,
-}
-
-#[derive(Debug)]
-pub enum ConnectionMessage<T> {
-    Data(T),
-    Establish {
-        connection: ConnectionId,
-        sender: Sender<Packet>,
-    },
 }
 
 impl Packet {

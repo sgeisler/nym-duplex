@@ -42,6 +42,8 @@ async fn authenticate(socket: &mut TcpStream) -> Result<(), SocksError> {
     Ok(())
 }
 
+/// Read the SOCKS request sent in the beginning. It contains instructions where to connect to.
+/// This implementation is probably not standard compliant.
 pub async fn receive_request(socket: &mut TcpStream) -> Result<SocksRequest, SocksError> {
     authenticate(socket).await?;
 

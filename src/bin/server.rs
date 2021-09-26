@@ -17,20 +17,28 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(StructOpt)]
 struct Options {
-    #[structopt(short, long, default_value = "ws://127.0.0.1:1977")]
+    #[structopt(
+        short,
+        long,
+        default_value = "ws://127.0.0.1:1977",
+        help = "Nym native client websocket address"
+    )]
     websocket: String,
 }
 
 #[tokio::main]
 async fn main() {
+    // Start logging service (specify log level using RUST_LOG env, default=info)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
+    // Read command line arguments
     let options: Options = Options::from_args();
 
+    // Connect to Nym native client
     debug!("Connecting to websocket at {}", &options.websocket);
     let (mut ws, _) = connect_async(&options.websocket)
         .await
@@ -41,13 +49,18 @@ async fn main() {
         .await
         .expect("failed to send identity request");
 
+    // Prepare communication channels between the main task and client connection tasks
     let (outgoing_sender, mut outgoing_receiver) =
         tokio::sync::mpsc::channel::<(Packet, ReplySurb)>(4);
     let mut connections = BTreeMap::<ConnectionId, Sender<(Packet, ReplySurb)>>::new();
 
     loop {
+        // Process events from the Nym connection and the client connections
         select! {
             ws_packet_res = ws.next() => {
+                // Receive Nym packets from the websocket, decode them and forward to the
+                // appropriate client connection task. Other than the client we also need to extract
+                // and forward the SURBs sent with the packet.
                 let ws_packet = ws_packet_res.and_then(Result::ok).expect("Web socket stream died");
                 let nym_bytes = match ws_packet {
                     Message::Binary(bin) => bin,
@@ -87,6 +100,7 @@ async fn main() {
                     }
                 };
 
+                // If we receive a new establish packet we spawn a task for the client connection
                 if let Payload::Establish { host, port } = &packet.payload {
                     if connections.get(&packet.stream).is_none() {
                         info!("Connection {:?} started, connecting to {}:{}", packet.stream, host, port);
@@ -101,6 +115,7 @@ async fn main() {
                     }
                 }
 
+                // Find the appropriate channel to the client task and forward the packet
                 let stream = packet.stream;
                 let stream_sender = match connections.get_mut(&stream) {
                     Some(stream_sender) => stream_sender,
@@ -114,6 +129,7 @@ async fn main() {
                 }
             }
             outgoing_res = outgoing_receiver.recv() => {
+                // Receive packets from client connection tasks, encode them and send them via Nym
                 let (packet, reply_surb) = outgoing_res.expect("Outgoing channel closed, this should not happen!");
 
                 let nym_packet = nym_websocket::requests::ClientRequest::Reply {
@@ -140,6 +156,7 @@ async fn handle_connection(
     outgoing_sender: Sender<(Packet, ReplySurb)>,
     mut incoming_receiver: Receiver<(Packet, ReplySurb)>,
 ) {
+    // Resolve the target hostname. Unfortunately connect does not do this anymore.
     let host = match tokio::net::lookup_host(&target)
         .await
         .map(|mut iter| iter.next())
@@ -154,6 +171,8 @@ async fn handle_connection(
             return;
         }
     };
+
+    // Connect to the destination requested by the client
     let mut socket = match TcpStream::connect(host).await {
         Ok(socket) => socket,
         Err(e) => {
@@ -162,6 +181,7 @@ async fn handle_connection(
         }
     };
 
+    // Initialize reliable transport with SURBs
     let mut last_sent_idx = 0;
     let mut last_received_idx = 0;
     let mut last_sent_unack: Option<Packet> = None;
@@ -169,10 +189,17 @@ async fn handle_connection(
     let mut resend_timer = tokio::time::interval(tokio::time::Duration::from_secs(1));
     resend_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+    // The buffer used to receive data from the socket. Its size defines the maximum data size sent
+    // in one packet. Thus it should be tuned such that its size plus the other overhead from the
+    // packet struct are equal to the maximum data size in one nym SURB reply since these can not be
+    // fragmented and larger payloads would lead to errors.
+    // TODO: tune to right size
     let mut buffer = [0u8; 500];
     loop {
         select! {
             _ = resend_timer.tick(), if next_surb.is_some() && last_sent_unack.is_some() => {
+                // If we have a packet that didn't receive an ACK yet we resend it (if we have a
+                // SURB for that).
                 let unack = last_sent_unack.as_ref().unwrap();
                 trace!("Resending message {}", unack.get_idx().unwrap());
                 outgoing_sender.send((unack.clone(), next_surb.take().unwrap()))
@@ -189,6 +216,9 @@ async fn handle_connection(
 
                 match packet.payload {
                     Payload::Data { idx, data } => {
+                        // If we received the expected data packet we write the data to our
+                        // socket. Otherwise it is dropped since it wouldn't fit into the data
+                        // stream.
                         let expected_idx = last_received_idx + 1;
                         if idx == expected_idx {
                             if socket.write_all(&data).await.is_err() {
@@ -224,6 +254,8 @@ async fn handle_connection(
                 }
             }
             read_res = socket.read(&mut buffer), if last_sent_unack.is_none() && next_surb.is_some() => {
+                // Read from our socket if we are ready to send a new packet. For that we need to
+                // have a SURB available and the last packet has to have been ACKed.
                 let read = match read_res {
                     Ok(read) => read,
                     Err(_) => {
@@ -232,6 +264,7 @@ async fn handle_connection(
                     }
                 };
 
+                // If we read 0 bytes, ignore
                 if read == 0 {
                     continue;
                 }
