@@ -148,7 +148,7 @@ async fn handle_connection(
         }
     };
 
-    info!("Received request for {}", socks_reqest.fqdn);
+    info!("Received request for {:?}", socks_reqest);
     // Initialize reliable transport
     let mut last_received_idx = 0;
     let mut last_sent_idx = 0;
@@ -163,10 +163,7 @@ async fn handle_connection(
     let mut last_sent_unack = Some(Packet {
         stream: connection_id,
         ack: last_received_idx,
-        payload: Payload::Establish {
-            host: socks_reqest.fqdn,
-            port: socks_reqest.port,
-        },
+        payload: Payload::Establish(socks_reqest),
     });
 
     // The buffer used to receive data from the socket. Its size defines the maximum data size sent

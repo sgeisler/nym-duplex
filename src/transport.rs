@@ -1,3 +1,4 @@
+use crate::socks::SocksRequest;
 use serde::{Deserialize, Serialize};
 
 /// Identifier of a connection, should be large enough chosen randomly since it's used as a crude
@@ -18,7 +19,7 @@ pub struct Packet {
 pub enum Payload {
     /// Sent by the client to establish a connection with the exit node and make it forward all
     /// traffic to a specified `target`
-    Establish { host: String, port: u16 },
+    Establish(SocksRequest),
     /// Sent by client or server to stream data to the other side
     Data {
         /// packet counter, begins at 1

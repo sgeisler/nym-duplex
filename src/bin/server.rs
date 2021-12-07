@@ -1,5 +1,6 @@
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
+use nym_duplex::socks::SocksRequest;
 use nym_duplex::transport::{ConnectionId, Packet, Payload};
 use nym_sphinx::anonymous_replies::ReplySurb;
 use nym_websocket::responses::ServerResponse;
@@ -101,14 +102,14 @@ async fn main() {
                 };
 
                 // If we receive a new establish packet we spawn a task for the client connection
-                if let Payload::Establish { host, port } = &packet.payload {
+                if let Payload::Establish(req) = &packet.payload {
                     if connections.get(&packet.stream).is_none() {
-                        info!("Connection {:?} started, connecting to {}:{}", packet.stream, host, port);
+                        info!("Connection {:?} started, connecting to {:?}", packet.stream, req);
                         let (incoming_sender, incoming_receiver) = tokio::sync::mpsc::channel::<(Packet, ReplySurb)>(4);
                         connections.insert(packet.stream, incoming_sender);
                         tokio::spawn(handle_connection(
                             packet.stream,
-                            format!("{}:{}", host, port),
+                            req.clone(),
                             outgoing_sender.clone(),
                             incoming_receiver
                         ));
@@ -152,31 +153,36 @@ fn build_identity_request() -> Message {
 
 async fn handle_connection(
     connection_id: ConnectionId,
-    target: String,
+    target: SocksRequest,
     outgoing_sender: Sender<(Packet, ReplySurb)>,
     mut incoming_receiver: Receiver<(Packet, ReplySurb)>,
 ) {
     // Resolve the target hostname. Unfortunately connect does not do this anymore.
-    let host = match tokio::net::lookup_host(&target)
-        .await
-        .map(|mut iter| iter.next())
-    {
-        Ok(Some(host)) => host,
-        Ok(None) => {
-            warn!("DNS lookup for {} didn't return a result", target);
-            return;
+    let dst = match target {
+        SocksRequest::Fqdn { fqdn, port } => {
+            match tokio::net::lookup_host((fqdn.clone(), port))
+                .await
+                .map(|mut iter| iter.next())
+            {
+                Ok(Some(host)) => host,
+                Ok(None) => {
+                    warn!("DNS lookup for {}:{} didn't return a result", fqdn, port);
+                    return;
+                }
+                Err(e) => {
+                    warn!("DNS lookup for {}:{} failed: {}", fqdn, port, e);
+                    return;
+                }
+            }
         }
-        Err(e) => {
-            warn!("DNS lookup for {} failed: {}", target, e);
-            return;
-        }
+        SocksRequest::Ip(dst) => dst,
     };
 
     // Connect to the destination requested by the client
-    let mut socket = match TcpStream::connect(host).await {
+    let mut socket = match TcpStream::connect(dst).await {
         Ok(socket) => socket,
         Err(e) => {
-            warn!("Outgoing connection to {} failed: {}", target, e);
+            warn!("Outgoing connection to {} failed: {}", dst, e);
             return;
         }
     };
